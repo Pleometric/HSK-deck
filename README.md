@@ -2,13 +2,23 @@
 
 Generate Anki flashcard decks for HSK Chinese vocabulary (levels 1-7) with AI-generated example sentences and native audio.
 
+## Card Preview
+
+<p align="center">
+  <img src="img/card-example-1.png" alt="Card example front" width="48%" />
+  <img src="img/card-example-2.png" alt="Card example back" width="48%" />
+</p>
+
+The cards show the target Hanzi and example sentence on the front, then reveal the reading and supporting information on the back.
+
 ## Overview
 
 This project creates Anki decks for studying Chinese using the new HSK 3.0 standard vocabulary lists. Supports any combination of HSK levels 1-7. Each card includes:
 - Target vocabulary word with pinyin
 - AI-generated example sentence using constrained vocabulary
-- Native Chinese word audio via Microsoft Edge Neural TTS
-- Native Chinese sentence audio via ElevenLabs when configured, with Microsoft Edge Neural fallback
+- Tone-colored pinyin on the back of the card
+- Native Chinese word audio via Microsoft Edge Neural TTS by default
+- Native Chinese sentence audio via ElevenLabs when configured, with Microsoft Edge Neural fallback when no key is present
 - English translations
 - Progressive difficulty (sentences only use previously learned words)
 
@@ -41,9 +51,10 @@ The key insight is that example sentences should only use vocabulary the learner
 
 **Stage 2: Deck Generation** (`generate_deck.py`)
 - Generates contextually appropriate sentences with vocabulary constraints
-- Generates Microsoft Edge Neural audio for each target word
+- Generates Microsoft Edge Neural audio for each target word by default
 - Generates sentence audio with ElevenLabs when `ELEVENLABS_API_KEY` is set
 - Falls back to Microsoft Edge Neural sentence audio when ElevenLabs is not configured
+- Applies tone coloring to the back-side word pinyin, including numbered readings such as `nu:3` and `lü4`
 - Builds Anki package with subdecks for each HSK level
 
 ## Requirements
@@ -99,6 +110,7 @@ HSK-deck/
 ├── audio/
 │   ├── words/                  # Microsoft neural word audio
 │   └── sentences/              # Sentence audio (ElevenLabs or Microsoft fallback)
+├── img/                        # README card preview screenshots
 ├── decks/                      # Final Anki decks (.apkg)
 ├── clean_vocabulary.py         # Stage 1: Vocabulary cleaning
 └── generate_deck.py            # Stage 2: Deck generation
@@ -111,6 +123,7 @@ HSK-deck/
 - **Smart Vocabulary**: Only uses words the learner should already know
 - **Word Audio by Default**: Microsoft Edge Neural reads each target word
 - **Sentence Audio Fallback**: Sentence audio uses ElevenLabs when available, otherwise Microsoft Edge Neural
+- **Tone Coloring**: The back-side pinyin is colorized by tone and normalizes numbered pinyin such as `lu:4` to marked pinyin
 - **Multiple Pronunciations**: Separate cards for words like 了 (le/liǎo), 行 (xíng/háng)
 
 ## Performance
@@ -126,12 +139,13 @@ Parallel processing with 10 sentence workers and 5 audio workers:
 **Front:**
 - Target word in large text
 - Example sentence (target word highlighted in green)
+- Word audio plays automatically
 
 **Back:**
-- Pinyin for word and sentence
+- Word pinyin with tone coloring
+- Sentence pinyin
 - English translation (hidden by default, click to reveal)
 - Word meaning (hidden by default, click to reveal)
-- Word audio plays automatically on the front
 - Sentence audio plays on the back
 
 ## Troubleshooting
