@@ -7,7 +7,8 @@ Generate Anki flashcard decks for HSK Chinese vocabulary (levels 1-7) with AI-ge
 This project creates Anki decks for studying Chinese using the new HSK 3.0 standard vocabulary lists. Supports any combination of HSK levels 1-7. Each card includes:
 - Target vocabulary word with pinyin
 - AI-generated example sentence using constrained vocabulary
-- Native Chinese audio (I used ElevenLabs TTS because I had free credits. Feel free to pick whichever provider you prefer)
+- Native Chinese word audio via Microsoft Edge Neural TTS
+- Native Chinese sentence audio via ElevenLabs when configured, with Microsoft Edge Neural fallback
 - English translations
 - Progressive difficulty (sentences only use previously learned words)
 
@@ -40,18 +41,20 @@ The key insight is that example sentences should only use vocabulary the learner
 
 **Stage 2: Deck Generation** (`generate_deck.py`)
 - Generates contextually appropriate sentences with vocabulary constraints
-- Generates audio for each sentence using ElevenLabs TTS
+- Generates Microsoft Edge Neural audio for each target word
+- Generates sentence audio with ElevenLabs when `ELEVENLABS_API_KEY` is set
+- Falls back to Microsoft Edge Neural sentence audio when ElevenLabs is not configured
 - Builds Anki package with subdecks for each HSK level
 
 ## Requirements
 
 ```bash
 # Python packages
-uv pip install openai elevenlabs genanki python-dotenv
+uv pip install openai elevenlabs edge-tts genanki python-dotenv
 
 # API Keys (in .env file)
 DEEPSEEK_API_KEY=your_key_here
-ELEVENLABS_API_KEY=your_key_here
+ELEVENLABS_API_KEY=your_key_here  # Optional
 ```
 
 ## Usage
@@ -80,7 +83,8 @@ uv run generate_deck.py
 
 This generates:
 - AI sentences for each card
-- Native audio files
+- Word audio files
+- Sentence audio files
 - Complete Anki deck (.apkg file)
 
 Output: `decks/HSK_{levels}_cleaned.apkg`
@@ -93,7 +97,8 @@ HSK-deck/
 ├── data/
 │   └── cleaned/                # Cleaned vocabulary (after Stage 1)
 ├── audio/
-│   └── sentences/              # Generated audio files
+│   ├── words/                  # Microsoft neural word audio
+│   └── sentences/              # Sentence audio (ElevenLabs or Microsoft fallback)
 ├── decks/                      # Final Anki decks (.apkg)
 ├── clean_vocabulary.py         # Stage 1: Vocabulary cleaning
 └── generate_deck.py            # Stage 2: Deck generation
@@ -104,7 +109,8 @@ HSK-deck/
 - **Parallel Processing**: Batch sentence generation and concurrent audio generation
 - **Rate Limit Handling**: Automatic retry with exponential backoff for API limits
 - **Smart Vocabulary**: Only uses words the learner should already know
-- **Native Audio**: High-quality Chinese TTS from ElevenLabs
+- **Word Audio by Default**: Microsoft Edge Neural reads each target word
+- **Sentence Audio Fallback**: Sentence audio uses ElevenLabs when available, otherwise Microsoft Edge Neural
 - **Multiple Pronunciations**: Separate cards for words like 了 (le/liǎo), 行 (xíng/háng)
 
 ## Performance
@@ -125,18 +131,24 @@ Parallel processing with 10 sentence workers and 5 audio workers:
 - Pinyin for word and sentence
 - English translation (hidden by default, click to reveal)
 - Word meaning (hidden by default, click to reveal)
-- Audio plays automatically
+- Word audio plays automatically on the front
+- Sentence audio plays on the back
 
 ## Troubleshooting
 
 ### Most Audio Files Failed (0 bytes)
-- This happens when hitting API concurrency limits
-- The script uses 5 workers to avoid this in Elevenlabs, but other TTS providers may have different quotas.
+- This usually happens when hitting API or network limits
+- The script uses 5 workers to avoid this in ElevenLabs, and retries transient failures automatically.
 - Automatic retry logic handles transient failures
 
 ### API Quota Exceeded
 - **DeepSeek**: Check usage at https://platform.deepseek.com/usage
 - **ElevenLabs**: Check quota at https://elevenlabs.io/app
+
+### Missing Microsoft Neural TTS
+- Install `edge-tts` in the project environment:
+  `uv pip install edge-tts`
+- Without `edge-tts`, the generator cannot use Microsoft Edge Neural voices for word audio or fallback sentence audio.
 
 ### Import Into Anki
 1. Open Anki

@@ -4,6 +4,7 @@ Generate Anki deck from cleaned vocabulary with constrained sentence generation.
 Supports parallelization for fast generation.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -17,6 +18,11 @@ from elevenlabs.client import ElevenLabs
 import genanki
 import random
 
+try:
+    import edge_tts
+except ImportError:
+    edge_tts = None
+
 # Load environment variables
 load_dotenv()
 
@@ -24,11 +30,21 @@ load_dotenv()
 SCRIPT_DIR = Path(__file__).parent.resolve()
 CLEANED_DIR = SCRIPT_DIR / "data/cleaned"
 DATA_DIR = SCRIPT_DIR / "data"
-AUDIO_DIR = SCRIPT_DIR / "audio/sentences"
+AUDIO_ROOT_DIR = SCRIPT_DIR / "audio"
+WORD_AUDIO_DIR = AUDIO_ROOT_DIR / "words"
+SENTENCE_AUDIO_DIR = AUDIO_ROOT_DIR / "sentences"
 DECK_DIR = SCRIPT_DIR / "decks"
 
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+WORD_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+SENTENCE_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 DECK_DIR.mkdir(parents=True, exist_ok=True)
+
+# Audio configuration
+MICROSOFT_TTS_VOICE = os.getenv('MICROSOFT_TTS_VOICE', 'zh-CN-YunjianNeural')
+MICROSOFT_TTS_RATE = os.getenv('MICROSOFT_TTS_RATE', '+0%')
+MICROSOFT_TTS_VOLUME = os.getenv('MICROSOFT_TTS_VOLUME', '+0%')
+ELEVENLABS_VOICE_ID = os.getenv('ELEVENLABS_VOICE_ID', 'pTOe8BQRdydOEIgv0wFL')
+ELEVENLABS_MODEL_ID = os.getenv('ELEVENLABS_MODEL_ID', 'eleven_multilingual_v2')
 
 # API Clients
 deepseek_client = OpenAI(
@@ -36,7 +52,8 @@ deepseek_client = OpenAI(
     base_url="https://api.deepseek.com"
 )
 
-elevenlabs_client = ElevenLabs(api_key=os.getenv('ELEVENLABS_API_KEY'))
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY', '').strip()
+elevenlabs_client = ElevenLabs(api_key=ELEVENLABS_API_KEY) if ELEVENLABS_API_KEY else None
 
 # Seed vocabulary (always allowed in sentences)
 SEED_VOCABULARY = {
@@ -183,6 +200,114 @@ def generate_sentence_for_card(card: Dict, known_vocab: Set[str], card_idx: int)
     return card
 
 
+def microsoft_tts_available() -> bool:
+    """Return True when the Microsoft Edge TTS dependency is installed."""
+    return edge_tts is not None
+
+
+def audio_setup_is_valid() -> bool:
+    """Return True when at least one sentence provider and one word provider are available."""
+    word_provider_available = microsoft_tts_available() or elevenlabs_client is not None
+    sentence_provider_available = elevenlabs_client is not None or microsoft_tts_available()
+    return word_provider_available and sentence_provider_available
+
+
+def word_audio_provider_label() -> str:
+    """Describe the current word audio provider."""
+    if microsoft_tts_available():
+        return f"Microsoft Edge Neural ({MICROSOFT_TTS_VOICE})"
+    if elevenlabs_client is not None:
+        return "ElevenLabs fallback"
+    return "Unavailable"
+
+
+def sentence_audio_provider_label() -> str:
+    """Describe the current sentence audio provider."""
+    if elevenlabs_client is not None:
+        return "ElevenLabs"
+    if microsoft_tts_available():
+        return f"Microsoft Edge Neural fallback ({MICROSOFT_TTS_VOICE})"
+    return "Unavailable"
+
+
+async def synthesize_microsoft_audio(text: str, output_path: Path) -> None:
+    """Generate a single MP3 via Microsoft Edge neural voices."""
+    tts = edge_tts.Communicate(
+        text=text,
+        voice=MICROSOFT_TTS_VOICE,
+        rate=MICROSOFT_TTS_RATE,
+        volume=MICROSOFT_TTS_VOLUME,
+    )
+    await tts.save(str(output_path))
+
+
+def generate_microsoft_audio(text: str, output_path: Path, retry_count: int = 3) -> bool:
+    """Generate audio using Microsoft Edge neural TTS with retries."""
+    if not microsoft_tts_available():
+        return False
+
+    for attempt in range(retry_count):
+        try:
+            asyncio.run(synthesize_microsoft_audio(text, output_path))
+            if output_path.exists() and output_path.stat().st_size > 0:
+                return True
+            if output_path.exists():
+                output_path.unlink()
+        except Exception:
+            if output_path.exists():
+                output_path.unlink()
+            if attempt < retry_count - 1:
+                time.sleep(1 + attempt)
+
+    return False
+
+
+def generate_elevenlabs_audio(text: str, output_path: Path, retry_count: int = 3) -> bool:
+    """Generate audio using ElevenLabs with retries."""
+    if elevenlabs_client is None:
+        return False
+
+    for attempt in range(retry_count):
+        try:
+            audio_generator = elevenlabs_client.text_to_speech.convert(
+                voice_id=ELEVENLABS_VOICE_ID,
+                text=text,
+                model_id=ELEVENLABS_MODEL_ID
+            )
+
+            with open(output_path, 'wb') as f:
+                for chunk in audio_generator:
+                    f.write(chunk)
+
+            if output_path.exists() and output_path.stat().st_size > 0:
+                return True
+
+            if output_path.exists():
+                output_path.unlink()
+
+        except Exception as e:
+            if output_path.exists():
+                output_path.unlink()
+
+            error_str = str(e).lower()
+            if '429' in error_str or 'rate limit' in error_str or 'too many requests' in error_str:
+                if attempt < retry_count - 1:
+                    time.sleep((2 ** attempt) * 0.5)
+                    continue
+
+            if attempt < retry_count - 1:
+                time.sleep(1)
+
+            break
+
+    return False
+
+
+def generate_audio_filename(card: Dict, card_idx: int, suffix: str) -> str:
+    """Build the stable audio filename for a card."""
+    return f"hsk{card['hsk_level']}_{card_idx:05d}_{suffix}.mp3"
+
+
 def generate_sentences_batch(all_cards: List[Dict], batch_start: int, batch_size: int, max_workers: int = 10) -> None:
     """Generate sentences for a batch of cards in parallel."""
 
@@ -210,65 +335,45 @@ def generate_sentences_batch(all_cards: List[Dict], batch_start: int, batch_size
 
 
 def generate_audio_for_card(card: Dict, card_idx: int) -> Dict:
-    """Generate audio for a single card. Returns card with audio_file added."""
+    """Generate word and sentence audio for a single card."""
 
-    audio_filename = f"hsk{card['hsk_level']}_{card_idx:05d}_sentence.mp3"
-    audio_path = AUDIO_DIR / audio_filename
+    word_audio_filename = generate_audio_filename(card, card_idx, "word")
+    word_audio_path = WORD_AUDIO_DIR / word_audio_filename
 
-    # Skip if already exists
-    if audio_path.exists() and audio_path.stat().st_size > 0:
-        card['audio_file'] = audio_filename
+    if word_audio_path.exists() and word_audio_path.stat().st_size > 0:
+        card['word_audio_file'] = word_audio_filename
+    else:
+        word_generated = False
+        if microsoft_tts_available():
+            word_generated = generate_microsoft_audio(card['word'], word_audio_path)
+        if not word_generated and elevenlabs_client is not None:
+            word_generated = generate_elevenlabs_audio(card['word'], word_audio_path)
+
+        card['word_audio_file'] = word_audio_filename if word_generated else ""
+
+    sentence_audio_filename = generate_audio_filename(card, card_idx, "sentence")
+    sentence_audio_path = SENTENCE_AUDIO_DIR / sentence_audio_filename
+
+    if sentence_audio_path.exists() and sentence_audio_path.stat().st_size > 0:
+        card['sentence_audio_file'] = sentence_audio_filename
         return card
 
-    # Retry logic for rate limiting
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            audio_generator = elevenlabs_client.text_to_speech.convert(
-                voice_id="pTOe8BQRdydOEIgv0wFL",
-                text=card['sentence'],
-                model_id="eleven_multilingual_v2"
-            )
+    sentence_generated = False
+    if elevenlabs_client is not None:
+        sentence_generated = generate_elevenlabs_audio(card['sentence'], sentence_audio_path)
+    if not sentence_generated and microsoft_tts_available():
+        sentence_generated = generate_microsoft_audio(card['sentence'], sentence_audio_path)
 
-            with open(audio_path, 'wb') as f:
-                for chunk in audio_generator:
-                    f.write(chunk)
-
-            # Verify file was created and has content
-            if audio_path.exists() and audio_path.stat().st_size > 0:
-                card['audio_file'] = audio_filename
-                return card
-            else:
-                # Delete empty file
-                if audio_path.exists():
-                    audio_path.unlink()
-
-        except Exception as e:
-            # Delete empty file if it was created
-            if audio_path.exists():
-                audio_path.unlink()
-
-            # Check if it's a rate limit error
-            error_str = str(e).lower()
-            if '429' in error_str or 'rate limit' in error_str or 'too many requests' in error_str:
-                if attempt < max_retries - 1:
-                    # Exponential backoff for rate limits
-                    wait_time = (2 ** attempt) * 0.5
-                    time.sleep(wait_time)
-                    continue
-
-            # For non-rate-limit errors or final retry, give up
-            break
-
-    card['audio_file'] = ""
+    card['sentence_audio_file'] = sentence_audio_filename if sentence_generated else ""
     return card
 
 
 def generate_audio_parallel(all_cards: List[Dict], max_workers: int = 5) -> None:
-    """Generate audio files in parallel with rate limiting."""
+    """Generate word and sentence audio files in parallel."""
 
     print(f"\nGenerating audio with {max_workers} parallel workers...")
-    print("(Using conservative rate limiting to avoid API errors)")
+    print(f"  Word audio provider: {word_audio_provider_label()}")
+    print(f"  Sentence audio provider: {sentence_audio_provider_label()}")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
@@ -281,18 +386,24 @@ def generate_audio_parallel(all_cards: List[Dict], max_workers: int = 5) -> None
                 time.sleep(0.1)
 
         completed = 0
-        successful = 0
+        word_successful = 0
+        sentence_successful = 0
         for future in as_completed(futures):
             idx = futures[future]
             updated_card = future.result()
             all_cards[idx] = updated_card  # Update the card in the list
 
-            if updated_card.get('audio_file'):
-                successful += 1
+            if updated_card.get('word_audio_file'):
+                word_successful += 1
+            if updated_card.get('sentence_audio_file'):
+                sentence_successful += 1
 
             completed += 1
             if completed % 50 == 0 or completed == len(all_cards):
-                print(f"  Progress: {completed}/{len(all_cards)} ({completed/len(all_cards)*100:.1f}%) - {successful} successful")
+                print(
+                    f"  Progress: {completed}/{len(all_cards)} ({completed/len(all_cards)*100:.1f}%)"
+                    f" - {word_successful} words, {sentence_successful} sentences"
+                )
 
 
 
@@ -303,7 +414,7 @@ def create_anki_model():
 
     return genanki.Model(
         model_id,
-        'HSK Chinese Card (Sentence Audio Only)',
+        'HSK Chinese Card',
         fields=[
             {'name': 'Word'},
             {'name': 'Pinyin'},
@@ -313,34 +424,53 @@ def create_anki_model():
             {'name': 'SentenceTranslation'},
             {'name': 'Classifier'},
             {'name': 'HSKLevel'},
+            {'name': 'WordAudio'},
             {'name': 'SentenceAudio'},
         ],
         templates=[
             {
                 'name': 'Card',
                 'qfmt': '''
-<div class="card chinese-card">
-<div class="word">{{Word}}</div>
-<div class="sentence">{{Sentence}}</div>
+<div class="chinese-card">
+  <div class="word">{{Word}}</div>
+  <div class="sentence">{{Sentence}}</div>
 </div>
 
 <script>
 (function() {
-const word = document.querySelector('.word').textContent.trim();
-const sentenceDiv = document.querySelector('.sentence');
-const sentence = sentenceDiv.textContent.trim();
+  const word = document.querySelector('.word').textContent.trim();
+  const sentenceDiv = document.querySelector('.sentence');
+  const sentenceRaw = sentenceDiv.innerHTML.trim();
 
-if (word && sentence && sentence.includes(word)) {
-sentenceDiv.innerHTML = sentence.replace(
-new RegExp(word, 'g'),
-'<span class="target">' + word + '</span>'
-);
-}
+  if (sentenceRaw.includes('{') && sentenceRaw.includes('}')) {
+    sentenceDiv.innerHTML = sentenceRaw.replace(
+      /\\{([^}]+)\\}/g,
+      '<span class="target">$1</span>'
+    );
+  } else if (word && sentenceRaw.includes(word)) {
+    sentenceDiv.innerHTML = sentenceRaw.replace(
+      new RegExp(word, 'g'),
+      '<span class="target">' + word + '</span>'
+    );
+  }
 })();
 </script>
 
 <style>
-.card { background: #2a2a2a; color: #e0e0e0; font-family: "Noto Sans SC", sans-serif; padding: 20px; }
+.card {
+  background: #1e1e1e;
+  color: #e0e0e0;
+  font-family: "Noto Sans SC", sans-serif;
+}
+
+.chinese-card {
+  background: #2a2a2a;
+  padding: 20px;
+  max-width: 800px;
+  margin: 20px auto;
+  border-radius: 8px;
+}
+
 .word { font-size: 72px; margin: 20px 0; text-align: center; }
 .sentence { font-size: 26px; margin: 30px 0; line-height: 1.8; text-align: center; }
 .sentence .target { color: #4ade80; font-weight: bold; }
@@ -373,7 +503,14 @@ new RegExp(word, 'g'),
 
 .audio-hidden { display: none; }
 hr { border: none; border-top: 1px solid #444; margin: 20px 0; }
+
+.tone1 { color: #ff4d4f !important; }
+.tone2 { color: #ff9800 !important; }
+.tone3 { color: #4caf50 !important; }
+.tone4 { color: #42a5f5 !important; }
+.tone5 { color: #9e9e9e !important; }
 </style>
+<div class="audio-hidden">{{WordAudio}}</div>
 ''',
                 'afmt': '''
 {{FrontSide}}
@@ -381,30 +518,243 @@ hr { border: none; border-top: 1px solid #444; margin: 20px 0; }
 <hr>
 
 <div class="back">
-<div class="pinyin">{{Pinyin}}</div>
-<div class="sentence-pinyin">{{SentencePinyin}}</div>
+  <div class="pinyin">{{Pinyin}}</div>
+  <div class="sentence-pinyin">{{SentencePinyin}}</div>
 
-<div class="button-container">
-<button onclick="document.getElementById('sent-trans').style.display='block'; this.style.display='none';" class="reveal-btn">
-Show Sentence Translation
-</button>
-</div>
-<div id="sent-trans" class="hidden-content">
-{{SentenceTranslation}}
+  <div class="button-container">
+    <button onclick="document.getElementById('sent-trans').style.display='block'; this.style.display='none';" class="reveal-btn">
+      Show Sentence Translation
+    </button>
+  </div>
+  <div id="sent-trans" class="hidden-content">
+    {{SentenceTranslation}}
+  </div>
+
+  <div class="button-container">
+    <button onclick="document.getElementById('meaning').style.display='block'; this.style.display='none';" class="reveal-btn">
+      Show Word Meaning
+    </button>
+  </div>
+  <div id="meaning" class="hidden-content">
+    {{Meaning}}
+  </div>
+
+  {{#Classifier}}<div class="classifier">{{Classifier}}</div>{{/Classifier}}
+  <div class="audio-hidden">{{SentenceAudio}}</div>
 </div>
 
-<div class="button-container">
-<button onclick="document.getElementById('meaning').style.display='block'; this.style.display='none';" class="reveal-btn">
-Show Word Meaning
-</button>
-</div>
-<div id="meaning" class="hidden-content">
-{{Meaning}}
-</div>
+<script>
+(function() {
+    var TONE_MARK_TO_TONE = {
+        "ā": 1, "á": 2, "ǎ": 3, "à": 4,
+        "ē": 1, "é": 2, "ě": 3, "è": 4,
+        "ī": 1, "í": 2, "ǐ": 3, "ì": 4,
+        "ō": 1, "ó": 2, "ǒ": 3, "ò": 4,
+        "ū": 1, "ú": 2, "ǔ": 3, "ù": 4,
+        "ǖ": 1, "ǘ": 2, "ǚ": 3, "ǜ": 4
+    };
+    var COMBINING_MARK_TO_TONE = {
+        "\\u0304": 1, "\\u0301": 2, "\\u030c": 3, "\\u0300": 4
+    };
+    var TONE_COLORS = {
+        1: "#ff4d4f", 2: "#ff9800", 3: "#4caf50", 4: "#42a5f5", 5: "#9e9e9e"
+    };
+    var BASE_VOWEL_TO_MARKED = {
+        "a": ["ā", "á", "ǎ", "à"],
+        "e": ["ē", "é", "ě", "è"],
+        "i": ["ī", "í", "ǐ", "ì"],
+        "o": ["ō", "ó", "ǒ", "ò"],
+        "u": ["ū", "ú", "ǔ", "ù"],
+        "ü": ["ǖ", "ǘ", "ǚ", "ǜ"],
+        "A": ["Ā", "Á", "Ǎ", "À"],
+        "E": ["Ē", "É", "Ě", "È"],
+        "I": ["Ī", "Í", "Ǐ", "Ì"],
+        "O": ["Ō", "Ó", "Ǒ", "Ò"],
+        "U": ["Ū", "Ú", "Ǔ", "Ù"],
+        "Ü": ["Ǖ", "Ǘ", "Ǚ", "Ǜ"]
+    };
+    var TONE_MARK_REGEX = /[āáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜĀÁǍÀĒÉĚÈĪÍǏÌŌÓǑÒŪÚǓÙǕǗǙǛ]/;
+    var PINYIN_CHARS = "A-Za-züÜāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜĀÁǍÀĒÉĚÈĪÍǏÌŌÓǑÒŪÚǓÙǕǗǙǛ";
+    var PINYIN_RUN_REGEX = new RegExp("^[" + PINYIN_CHARS + "]+$");
+    var PINYIN_TOKEN_REGEX = new RegExp("[" + PINYIN_CHARS + "]+|\\\\s+|[^" + PINYIN_CHARS + "\\\\s]+", "g");
+    var POST_TONE_SEGMENT_REGEX = /^(?:[aeiouü]{0,2}(?:n|ng|r)?)$/;
+    var PRE_TONE_SEGMENT_REGEX = /^(?:(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsyw])?[aeiouü]{0,2})$/;
+    var PINYIN_INITIAL_FINAL_REGEX = /^(?:(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsl])(?:a|o|e|i|u|ai|ei|ao|ou|an|en|ang|eng|ong|ia|ie|iao|iu|ian|in|iang|ing|iong|ua|uo|uai|ui|uan|un|uang|ueng|ü|üe|üan|ün))$/;
+    var PINYIN_SPECIAL_REGEX = /^(?:zhi|chi|shi|ri|zi|ci|si|er|yi|ya|yo|ye|yao|you|yan|yin|yang|ying|yong|yu|yue|yuan|yun|wu|wa|wo|wai|wei|wan|wen|wang|weng|a|o|e|ai|ei|ao|ou|an|en|ang|eng|ong|m|n|ng)$/;
 
-{{#Classifier}}<div class="classifier">{{Classifier}}</div>{{/Classifier}}
-<div class="audio-hidden">{{SentenceAudio}}</div>
-</div>
+    function toBasePinyin(text) {
+        return Array.from(text).map(function(char) {
+            var lower = char.toLowerCase();
+            if (TONE_MARK_TO_TONE.hasOwnProperty(lower)) {
+                if ("āáǎà".includes(lower)) return "a";
+                if ("ēéěè".includes(lower)) return "e";
+                if ("īíǐì".includes(lower)) return "i";
+                if ("ōóǒò".includes(lower)) return "o";
+                if ("ūúǔù".includes(lower)) return "u";
+                if ("ǖǘǚǜ".includes(lower)) return "ü";
+            }
+            if (lower === "ü") return "ü";
+            return lower;
+        }).join("");
+    }
+
+    function normalizePinyinText(text) {
+        var normalized = (text || "")
+            .replace(/u:/g, "ü")
+            .replace(/U:/g, "Ü")
+            .replace(/v/g, "ü")
+            .replace(/V/g, "Ü")
+            .replace(/[·•・]/g, " ")
+            .replace(/\\s+/g, " ")
+            .trim();
+        normalized = normalized.replace(/[A-Za-züÜ]+[1-5]/g, function(match) {
+            return convertNumberedSyllable(match);
+        });
+        return normalized.normalize ? normalized.normalize("NFC") : normalized;
+    }
+
+    function addToneMark(syllable, tone) {
+        if (tone === 5) return syllable;
+
+        var lower = syllable.toLowerCase();
+        var markIndex = -1;
+
+        if (lower.indexOf("a") !== -1) {
+            markIndex = lower.indexOf("a");
+        } else if (lower.indexOf("e") !== -1) {
+            markIndex = lower.indexOf("e");
+        } else if (lower.indexOf("ou") !== -1) {
+            markIndex = lower.indexOf("o");
+        } else {
+            for (var i = syllable.length - 1; i >= 0; i--) {
+                if ("aeiouüAEIOUÜ".indexOf(syllable[i]) !== -1) {
+                    markIndex = i;
+                    break;
+                }
+            }
+        }
+
+        if (markIndex === -1) return syllable;
+
+        var marked = BASE_VOWEL_TO_MARKED[syllable[markIndex]];
+        if (!marked) return syllable;
+
+        return syllable.slice(0, markIndex) + marked[tone - 1] + syllable.slice(markIndex + 1);
+    }
+
+    function convertNumberedSyllable(syllable) {
+        var match = syllable.match(/^([A-Za-züÜ]+)([1-5])$/);
+        if (!match) return syllable;
+
+        var base = match[1];
+        var tone = Number(match[2]);
+        return addToneMark(base, tone);
+    }
+
+    function detectTone(syllable) {
+        for (var i = 0; i < syllable.length; i++) {
+            var char = syllable[i];
+            var tone = TONE_MARK_TO_TONE[char.toLowerCase()];
+            if (tone) return tone;
+            if (COMBINING_MARK_TO_TONE.hasOwnProperty(char)) return COMBINING_MARK_TO_TONE[char];
+        }
+        return 5;
+    }
+
+    function isLikelyPinyinSyllable(syllable) {
+        var base = toBasePinyin(syllable);
+        return PINYIN_SPECIAL_REGEX.test(base) || PINYIN_INITIAL_FINAL_REGEX.test(base);
+    }
+
+    function chooseSplitBetweenTones(run, start, toneIndex, nextToneIndex) {
+        for (var split = nextToneIndex; split >= toneIndex + 1; split--) {
+            var leftTail = toBasePinyin(run.slice(toneIndex + 1, split));
+            var rightHead = toBasePinyin(run.slice(split, nextToneIndex));
+            var leftSyllable = run.slice(start, split);
+            if (POST_TONE_SEGMENT_REGEX.test(leftTail) && PRE_TONE_SEGMENT_REGEX.test(rightHead) && isLikelyPinyinSyllable(leftSyllable)) return split;
+        }
+        return toneIndex + 1;
+    }
+
+    function chooseTailSplit(run, start, toneIndex) {
+        var trailing = run.slice(toneIndex + 1);
+        for (var len = trailing.length; len >= 0; len--) {
+            var tail = toBasePinyin(trailing.slice(0, len));
+            var end = toneIndex + 1 + len;
+            var syllable = run.slice(start, end);
+            if (POST_TONE_SEGMENT_REGEX.test(tail) && isLikelyPinyinSyllable(syllable)) return end;
+        }
+        return run.length;
+    }
+
+    function alignSyllableStart(run, start, toneIndex) {
+        for (var candidate = start; candidate <= toneIndex; candidate++) {
+            var head = toBasePinyin(run.slice(candidate, toneIndex));
+            if (PRE_TONE_SEGMENT_REGEX.test(head)) return candidate;
+        }
+        return start;
+    }
+
+    function splitPinyinRun(run) {
+        var toneIndexes = [];
+        for (var i = 0; i < run.length; i++) {
+            if (TONE_MARK_REGEX.test(run[i])) toneIndexes.push(i);
+        }
+        if (toneIndexes.length === 0) return [run];
+
+        var syllables = [];
+        var start = 0;
+        for (var i = 0; i < toneIndexes.length; i++) {
+            var toneIndex = toneIndexes[i];
+            var alignedStart = alignSyllableStart(run, start, toneIndex);
+            if (alignedStart > start) {
+                syllables.push(run.slice(start, alignedStart));
+                start = alignedStart;
+            }
+            if (i < toneIndexes.length - 1) {
+                var end = chooseSplitBetweenTones(run, start, toneIndex, toneIndexes[i + 1]);
+                syllables.push(run.slice(start, end));
+                start = end;
+            } else {
+                var end = chooseTailSplit(run, start, toneIndex);
+                syllables.push(run.slice(start, end));
+                if (end < run.length) syllables.push(run.slice(end));
+            }
+        }
+        return syllables.filter(Boolean);
+    }
+
+    function colorizePinyin(element) {
+        if (!element) return;
+        var reading = normalizePinyinText(element.textContent);
+        if (!reading) return;
+
+        var tokens = reading.match(PINYIN_TOKEN_REGEX) || [];
+        var fragment = document.createDocumentFragment();
+        for (var t = 0; t < tokens.length; t++) {
+            var token = tokens[t];
+            if (!PINYIN_RUN_REGEX.test(token)) {
+                fragment.appendChild(document.createTextNode(token));
+                continue;
+            }
+            var syllables = splitPinyinRun(token);
+            for (var s = 0; s < syllables.length; s++) {
+                var syllable = syllables[s];
+                var tone = detectTone(syllable);
+                var span = document.createElement("span");
+                span.className = "tone-syllable tone" + tone;
+                span.textContent = syllable;
+                span.style.color = TONE_COLORS[tone] || TONE_COLORS[5];
+                fragment.appendChild(span);
+            }
+        }
+        element.textContent = "";
+        element.appendChild(fragment);
+    }
+
+    colorizePinyin(document.querySelector('.back .pinyin'));
+})();
+</script>
 '''
             }
         ]
@@ -420,6 +770,12 @@ def generate_deck(levels: List[int], batch_size: int = 50, sentence_workers: int
     print(f"Parallelization: {sentence_workers} sentence workers, {audio_workers} audio workers")
     print(f"Batch size: {batch_size}")
     print(f"{'='*80}\n")
+
+    if not audio_setup_is_valid():
+        print("❌ No usable audio setup found.")
+        print("   Install Microsoft TTS support with: uv pip install edge-tts")
+        print("   Or configure ELEVENLABS_API_KEY for ElevenLabs sentence audio.")
+        return
 
     # Load all cleaned vocabulary
     all_cards = []
@@ -493,16 +849,22 @@ def generate_deck(levels: List[int], batch_size: int = 50, sentence_workers: int
                 card.get('sentence_translation', ''),
                 card.get('classifier', ''),
                 str(card['hsk_level']),
-                f"[sound:{card['audio_file']}]" if card.get('audio_file') else "",
+                f"[sound:{card['word_audio_file']}]" if card.get('word_audio_file') else "",
+                f"[sound:{card['sentence_audio_file']}]" if card.get('sentence_audio_file') else "",
             ]
         )
 
         subdecks[card['hsk_level']].add_note(note)
 
-        if card.get('audio_file'):
-            audio_path = AUDIO_DIR / card['audio_file']
-            if audio_path.exists():
-                media_files.append(str(audio_path))
+        if card.get('word_audio_file'):
+            word_audio_path = WORD_AUDIO_DIR / card['word_audio_file']
+            if word_audio_path.exists():
+                media_files.append(str(word_audio_path))
+
+        if card.get('sentence_audio_file'):
+            sentence_audio_path = SENTENCE_AUDIO_DIR / card['sentence_audio_file']
+            if sentence_audio_path.exists():
+                media_files.append(str(sentence_audio_path))
 
     print(f"\n✓ Added {len(all_cards)} notes to deck")
     print(f"✓ Collected {len(media_files)} audio files\n")
@@ -530,7 +892,9 @@ def main():
     print("="*80)
     print("\nFeatures:")
     print("  ✓ Parallel sentence generation (batch processing)")
-    print("  ✓ Parallel audio generation (fully concurrent)")
+    print("  ✓ Microsoft neural word audio")
+    print("  ✓ ElevenLabs sentence audio when configured")
+    print("  ✓ Microsoft neural fallback for sentence audio")
     print("="*80)
 
     level_input = input("\nWhich HSK level(s)? [1-7 or '1,2,3']: ").strip()
