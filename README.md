@@ -22,6 +22,8 @@ This project creates Anki decks for studying Chinese using the new HSK 3.0 stand
 - English translations
 - Progressive difficulty (sentences only use previously learned words)
 
+The raw HSK source lists are vendored directly in this repository under `complete-hsk-vocabulary/`, so the project does not depend on GitHub resolving an external submodule correctly.
+
 ## The Approach
 
 ### Constrained Sentence Generation
@@ -104,7 +106,7 @@ Output: `decks/HSK_{levels}_cleaned.apkg`
 
 ```
 HSK-deck/
-├── complete-hsk-vocabulary/    # Raw HSK vocabulary lists (source data)
+├── complete-hsk-vocabulary/    # Vendored HSK vocabulary lists (source data)
 ├── data/
 │   └── cleaned/                # Cleaned vocabulary (after Stage 1)
 ├── audio/
@@ -172,7 +174,7 @@ Parallel processing with 10 sentence workers and 5 audio workers:
 
 ## Credits
 
-- **Vocabulary Data**: [complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary)
+- **Vocabulary Data**: Vendored copy of [complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary)
 - **Sentence Generation System Prompt**: [@0bNARA](https://x.com/0bNARA) (with minimal modifications)
 
 ## License
