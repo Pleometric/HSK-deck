@@ -1,0 +1,20 @@
+{
+    "standard": "gf0025-2021",
+    "applies_to": [
+        "wordlists/exclusive/new/1.json",
+        "wordlists/exclusive/new/1.min.json",
+        "wordlists/exclusive/new/2.json",
+        "wordlists/exclusive/new/2.min.json",
+        "wordlists/exclusive/new/3.json",
+        "wordlists/exclusive/new/3.min.json",
+        "wordlists/exclusive/new/4.json",
+        "wordlists/exclusive/new/4.min.json",
+        "wordlists/exclusive/new/5.json",
+        "wordlists/exclusive/new/5.min.json",
+        "wordlists/exclusive/new/6.json",
+        "wordlists/exclusive/new/6.min.json",
+        "wordlists/exclusive/new/7.json",
+        "wordlists/exclusive/new/7.min.json"
+    ],
+    "$comment": "The 'new' HSK 3.0 levels (1-7, where 7 covers bands 7-9) follow the national grading standard 国际中文教育中文水平等级标准 (GF0025-2021), in force since July 2021. The HSK 3.0 exam that launches on 13 December 2026 follows the 2025 examination syllabus, which places about four in ten of the words they share at a different level. In complete.json, levels prefixed 'n' follow GF0025-2021 and levels prefixed 'o' follow the original 2009-10 HSK lists (hsk-2010), before Hanban's late-2012 revision."
+}

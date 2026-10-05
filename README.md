@@ -13,7 +13,7 @@ The cards show the target Hanzi and example sentence on the front, then reveal t
 
 ## Overview
 
-This project creates Anki decks for studying Chinese using the new HSK 3.0 standard vocabulary lists. Supports any combination of HSK levels 1-7. Each card includes:
+This project creates Anki decks for studying Chinese using the new HSK 3.0 vocabulary lists of the 2021 national standard (GF0025-2021; see `complete-hsk-vocabulary/standard.json`). Supports any combination of HSK levels 1-7. Each card includes:
 - Target vocabulary word with pinyin
 - AI-generated example sentence using constrained vocabulary
 - Tone-colored pinyin on the back of the card
