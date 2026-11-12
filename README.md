@@ -43,6 +43,8 @@ The key insight is that example sentences should only use vocabulary the learner
 - Card 50 learns "喜欢" (like) → sentence can use 你 + 49 other learned words + 喜欢
 - Card 500 learns "复杂" (complex) → sentence can use all 499 previous words + 复杂
 
+**Checking the result (optional):** with [hsk30](https://pypi.org/project/hsk30/) installed, each generated sentence is checked for characters that no known word contains and that sit above the deck's highest HSK level. A sentence that has any is sent back with those characters named, up to twice; any still left are listed at the end of stage 1. The check grades against GF0025-2021, the standard the vendored lists follow; set `HSK_STANDARD=2025` to grade against the 2025 HSK examination syllabus, which the HSK 3.0 exam uses from 13 December 2026.
+
 ### Two-Stage Cleaning
 
 **Stage 1: Vocabulary Cleaning** (`clean_vocabulary.py`)
@@ -64,6 +66,7 @@ The key insight is that example sentences should only use vocabulary the learner
 ```bash
 # Python packages
 uv pip install openai elevenlabs edge-tts genanki python-dotenv
+uv pip install hsk30  # Optional: checks sentences stay within the deck's levels
 
 # API Keys (in .env file)
 DEEPSEEK_API_KEY=your_key_here

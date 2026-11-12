@@ -23,6 +23,18 @@ try:
 except ImportError:
     edge_tts = None
 
+# Optional: check generated sentences against the HSK character lists
+# (uv pip install hsk30). Without it, sentences are accepted as generated.
+try:
+    import hsk30
+except ImportError:
+    hsk30 = None
+
+# Which document the check grades against. "2021" is GF0025-2021, the standard
+# the vendored complete-hsk-vocabulary lists follow. "2025" is the 2025 HSK
+# examination syllabus, which the HSK 3.0 exam uses from 13 December 2026.
+HSK_STANDARD = os.getenv('HSK_STANDARD', '2021')
+
 # Load environment variables
 load_dotenv()
 
@@ -154,8 +166,37 @@ def build_known_vocabulary(all_cards: List[Dict], up_to_index: int) -> Set[str]:
     return known
 
 
-def generate_sentence_for_card(card: Dict, known_vocab: Set[str], card_idx: int) -> Dict:
-    """Generate sentence for a single card. Returns card with sentence data added."""
+def characters_beyond_deck(sentence: str, known_vocab: Set[str], target: str, max_level: int) -> List[str]:
+    """Characters in a generated sentence that no known word or the target word
+    contains, and that sit above the deck's highest HSK level (or on no HSK list).
+
+    The prompt asks the model to use only known vocabulary, but nothing checked
+    that it did. Characters already in a known word are allowed, so the check
+    only catches what the learner has genuinely not met. Returns an empty list
+    when hsk30 is not installed.
+    """
+    if hsk30 is None or not max_level:
+        return []
+    taught = set(''.join(known_vocab)) | set(target)
+    table = hsk30.characters(HSK_STANDARD)
+    beyond = []
+    for ch in hsk30.hanzi(sentence):
+        if ch in taught or ch in beyond:
+            continue
+        level = table.get(ch)
+        if level is None or level > max_level:
+            beyond.append(ch)
+    return beyond
+
+
+def generate_sentence_for_card(card: Dict, known_vocab: Set[str], card_idx: int, max_level: int = 0) -> Dict:
+    """Generate sentence for a single card. Returns card with sentence data added.
+
+    With hsk30 installed and ``max_level`` set, a sentence that uses characters
+    beyond the deck is sent back once or twice with the offending characters
+    named. If the last attempt still has some, it is kept and the characters are
+    recorded in ``card['sentence_beyond']`` for review.
+    """
 
     vocab_list = sorted(list(known_vocab))
 
@@ -166,14 +207,16 @@ def generate_sentence_for_card(card: Dict, known_vocab: Set[str], card_idx: int)
         "vocabulary": vocab_list
     }, ensure_ascii=False)
 
+    messages = [
+        {"role": "system", "content": SENTENCE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message}
+    ]
+
     for attempt in range(3):
         try:
             response = deepseek_client.chat.completions.create(
                 model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": SENTENCE_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message}
-                ],
+                messages=messages,
                 temperature=0.7
             )
 
@@ -181,6 +224,17 @@ def generate_sentence_for_card(card: Dict, known_vocab: Set[str], card_idx: int)
             parsed = extract_json_from_response(result)
 
             if parsed and 'sentence' in parsed:
+                beyond = characters_beyond_deck(parsed.get('sentence', ''), known_vocab, card['word'], max_level)
+                if beyond and attempt < 2:
+                    messages = messages + [
+                        {"role": "assistant", "content": result},
+                        {"role": "user", "content": (
+                            f"句子里的这些字不在词汇表里，也超出了 HSK {max_level} 的范围：{'、'.join(beyond)}。"
+                            "请只用词汇表里的词和目标词重新造句，输出格式不变。")}
+                    ]
+                    continue
+                if beyond:
+                    card['sentence_beyond'] = ''.join(beyond)
                 card['sentence'] = parsed.get('sentence', '')
                 card['sentence_pinyin'] = parsed.get('sentence_pinyin', '')
                 card['sentence_translation'] = parsed.get('sentence_translation', '')
@@ -308,7 +362,7 @@ def generate_audio_filename(card: Dict, card_idx: int, suffix: str) -> str:
     return f"hsk{card['hsk_level']}_{card_idx:05d}_{suffix}.mp3"
 
 
-def generate_sentences_batch(all_cards: List[Dict], batch_start: int, batch_size: int, max_workers: int = 10) -> None:
+def generate_sentences_batch(all_cards: List[Dict], batch_start: int, batch_size: int, max_workers: int = 10, max_level: int = 0) -> None:
     """Generate sentences for a batch of cards in parallel."""
 
     batch_end = min(batch_start + batch_size, len(all_cards))
@@ -324,7 +378,7 @@ def generate_sentences_batch(all_cards: List[Dict], batch_start: int, batch_size
         futures = {}
         for local_idx, card in enumerate(batch):
             card_idx = batch_start + local_idx
-            future = executor.submit(generate_sentence_for_card, card, known_vocab, card_idx)
+            future = executor.submit(generate_sentence_for_card, card, known_vocab, card_idx, max_level)
             futures[future] = card_idx
 
         completed = 0
@@ -800,12 +854,20 @@ def generate_deck(levels: List[int], batch_size: int = 50, sentence_workers: int
     print(f"{'='*80}")
 
     # Process in batches
+    if hsk30 is None:
+        print("(Sentence check off: install hsk30 to catch characters beyond the deck.)")
     for batch_start in range(0, len(all_cards), batch_size):
-        generate_sentences_batch(all_cards, batch_start, batch_size, sentence_workers)
+        generate_sentences_batch(all_cards, batch_start, batch_size, sentence_workers, max(levels))
         # Rate limiting between batches
         time.sleep(2)
 
     print(f"\n✓ Completed sentence generation\n")
+    beyond = [c for c in all_cards if c.get('sentence_beyond')]
+    if beyond:
+        print(f"⚠ {len(beyond)} sentences still use characters beyond HSK {max(levels)} after retries:")
+        for c in beyond[:20]:
+            print(f"   {c['word']}: {c['sentence']}  ({c['sentence_beyond']})")
+
 
     # Stage 2: Generate audio
     print(f"{'='*80}")
